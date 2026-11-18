@@ -1,54 +1,102 @@
 from pathlib import Path
+import sqlite3
 
 import joblib
 import streamlit as st
 
 
 st.set_page_config(page_title="SmartCart", page_icon="🛒")
-
-app_folder = Path(__file__).resolve().parent
+folder = Path(__file__).resolve().parent
 
 
 @st.cache_resource
 def load_smartcart():
-    return joblib.load(app_folder / "smartcart.pkl")
+    saved = joblib.load(folder / "smartcart.pkl")
+
+    with sqlite3.connect(folder / "catalog.db") as db:
+        rows = db.execute(
+            "SELECT product_id, name, photo FROM products ORDER BY name"
+        ).fetchall()
+
+    catalog = {}
+    for product_id, name, photo in rows:
+        catalog[product_id] = {"name": name, "photo": photo}
+
+    return saved, catalog
 
 
-saved = load_smartcart()
-model = saved["model"]
-matrix = saved["rating_matrix"]
-product_ids = saved["product_ids"]
+def recommend(selected_id, saved, catalog):
+    ids = saved["product_ids"]
+    matrix = saved["rating_matrix"]
+    model = saved["model"]
+    selected_row = ids.get_loc(selected_id)
 
-
-def recommend(product_id):
-    row = product_ids.get_loc(product_id)
-    neighbors = model.kneighbors(
-        matrix[row],
-        n_neighbors=min(6, len(product_ids)),
-        return_distance=False
+    # Ek selected product ko baaki products se compare karo
+    distances, rows = model.kneighbors(
+        matrix[selected_row],
+        n_neighbors=len(ids)
     )
 
-    suggestions = []
-    for number in neighbors[0]:
-        if number != row:
-            suggestions.append(product_ids[number])
+    results = []
+    for distance, row in zip(distances[0], rows[0]):
+        if distance >= 1:
+            break
 
-    return suggestions[:5]
+        product_id = ids[row]
+        if product_id != selected_id and product_id in catalog:
+            results.append(product_id)
+
+        if len(results) == 5:
+            break
+
+    return results
 
 
 st.title("🛒 SmartCart")
-st.write("Choose a product to find others with similar customer rating patterns.")
+st.write("Search for a grocery product to see recommendations based on customer ratings.")
 
-with st.form("product_search"):
-    selected_id = st.selectbox("Search or select a product ID", product_ids.tolist())
-    search = st.form_submit_button("Find similar products")
+if not (folder / "catalog.db").is_file() or not (folder / "smartcart.pkl").is_file():
+    st.error("Place catalog.db and smartcart.pkl in the same folder as app.py.")
+    st.stop()
 
-if search:
-    st.subheader(f"Recommendations for {selected_id}")
+saved, catalog = load_smartcart()
+available_ids = [pid for pid in catalog if pid in saved["product_ids"]]
 
-    for rank, product_id in enumerate(recommend(selected_id), start=1):
-        st.write(f"**{rank}. Product {product_id}**")
+if not available_ids:
+    st.error("The catalog has no products matching this model.")
+    st.stop()
 
-        image_file = app_folder / "images" / f"{product_id}.jpg"
-        if image_file.is_file():
-            st.image(str(image_file), width=160)
+selected_id = st.selectbox(
+    "Search by product name",
+    options=available_ids,
+    format_func=lambda pid: catalog[pid]["name"]
+)
+
+selected = catalog[selected_id]
+photo_column, name_column = st.columns([1, 2])
+
+with photo_column:
+    st.image(selected["photo"], width=160)
+
+with name_column:
+    st.subheader(selected["name"])
+    st.caption(f"Product ID: {selected_id}")
+
+st.subheader("Recommended for you")
+suggestions = recommend(selected_id, saved, catalog)
+
+if not suggestions:
+    st.info("This product has no matching rating pattern in the photo catalog. Try another product.")
+
+for product_id in suggestions:
+    product = catalog[product_id]
+    photo_column, name_column = st.columns([1, 2])
+
+    with photo_column:
+        st.image(product["photo"], width=130)
+
+    with name_column:
+        st.write(product["name"])
+        st.caption(f"Product ID: {product_id}")
+
+    st.divider()
